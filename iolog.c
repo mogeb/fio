@@ -142,7 +142,25 @@ static int ipo_special(struct thread_data *td, struct io_piece *ipo)
 	return 1;
 }
 
-static bool read_iolog2(struct thread_data *td);
+static bool read_iolog(struct thread_data *td);
+
+unsigned long long delay_since_ttime(const struct thread_data *td,
+	       unsigned long long time)
+{
+	double tmp;
+	double scale;
+	const unsigned long long *last_ttime = &td->io_log_last_ttime;
+
+	if (!*last_ttime || td->o.no_stall || time < *last_ttime)
+		return 0;
+	else if (td->o.replay_time_scale == 100)
+		return time - *last_ttime;
+
+
+	scale = (double) 100.0 / (double) td->o.replay_time_scale;
+	tmp = time - *last_ttime;
+	return tmp * scale;
+}
 
 int read_iolog_get(struct thread_data *td, struct io_u *io_u)
 {
@@ -422,9 +440,16 @@ static bool read_iolog2(struct thread_data *td)
 	while ((p = fgets(str, 4096, td->io_log_rfile)) != NULL) {
 		struct io_piece *ipo;
 		int r;
+		unsigned long long ttime;
 
-		r = sscanf(p, "%256s %256s %llu %u", rfname, act, &offset,
-									&bytes);
+		if (td->io_log_version == 2)
+			r = sscanf(p, "%256s %256s %llu %u", rfname, act, &offset, &bytes);
+		else if (td->io_log_version == 3) {
+			r = sscanf(p, "%llu %256s %256s %llu %u", &ttime, rfname, act,
+							&offset, &bytes);
+			delay = delay_since_ttime(td, ttime);
+			td->io_log_last_ttime = ttime;
+		}
 
 		if (td->o.replay_redirect)
 			fname = td->o.replay_redirect;
@@ -871,7 +896,6 @@ static void flush_hist_samples(FILE *f, int hist_coarseness, void *samples,
 	uint64_t *io_u_plat_before;
 
 	int stride = 1 << hist_coarseness;
-	
 	if (!sample_size)
 		return;
 
@@ -1255,13 +1279,11 @@ void flush_log(struct io_log *log, bool do_append)
 
 		cur_log = flist_first_entry(&log->io_logs, struct io_logs, list);
 		flist_del_init(&cur_log->list);
-		
 		if (log->td && log == log->td->clat_hist_log)
 			flush_hist_samples(f, log->hist_coarseness, cur_log->log,
 			                   log_sample_sz(log, cur_log));
 		else
 			flush_samples(f, cur_log->log, log_sample_sz(log, cur_log));
-		
 		sfree(cur_log);
 	}
 
